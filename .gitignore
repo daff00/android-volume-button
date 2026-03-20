@@ -1,0 +1,37 @@
+# Gradle files
+.gradle/
+build/
+# Ignore manual Gradle distributions
+gradle-*/ 
+
+# Local configuration
+local.properties
+secrets.properties
+
+# Log files
+*.log
+
+# Android Studio / IntelliJ files
+.idea/
+*.iml
+*.iws
+.navigation/
+
+# VS Code files
+.vscode/
+
+# Device/Captures
+captures/
+
+# Output files (Keep your repo light!)
+*.apk
+*.aab
+
+# Keystore files
+*.jks
+*.keystore
+
+# System files
+.DS_Store
+Thumbs.db
+desktop.ini
