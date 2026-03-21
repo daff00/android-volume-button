@@ -21,7 +21,8 @@
 
         <service android:name=".FloatingVolumeService"
             android:enabled="true"
-            android:exported="false" />
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
 
     </application>
 </manifest>
