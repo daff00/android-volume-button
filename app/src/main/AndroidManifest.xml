@@ -2,27 +2,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    
+
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
-    <application
-        android:label="Volume Overlay"
-        android:icon="@mipmap/ic_launcher"
-        android:roundIcon="@mipmap/ic_launcher"
-        android:allowBackup="false">
+    <application android:label="Volume Overlay" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false">
 
-        <activity android:name=".MainActivity"
-            android:exported="true">
+        <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <service android:name=".FloatingVolumeService"
-            android:enabled="true"
-            android:exported="false"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
+        <service android:name=".FloatingVolumeService" android:enabled="true" android:exported="false" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
 
     </application>
 </manifest>

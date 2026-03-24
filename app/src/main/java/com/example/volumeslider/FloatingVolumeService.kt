@@ -17,7 +17,6 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import androidx.core.app.NotificationCompat
-import kotlin.math.abs
 
 class FloatingVolumeService : Service() {
 
@@ -36,31 +35,33 @@ class FloatingVolumeService : Service() {
 
     // Add this helper function inside your class
     private fun updateDisplayMetrics() {
-        val metrics = resources.displayMetrics
-        screenWidth = metrics.widthPixels
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val bounds = wm.currentWindowMetrics.bounds
+        screenWidth = bounds.width()
     }
 
     // The Quick Ball intellihide animation
     private val hideRunnable = Runnable {
-        updateDisplayMetrics() // Refresh width right before hiding
+        updateDisplayMetrics()
         isCollapsed = true
-        
+
         val viewWidth = floatingView.width
-        // Calculate exactly where the "peek" should be
-        val peekWidth = (15 * resources.displayMetrics.density).toInt() // 15dp visible
+        // Increased from 15dp to 32dp. Still unobtrusive, but
+        // actually hittable — especially important on a 6.5" display.
+        val peekDp = 32
+        val peekPx = (peekDp * resources.displayMetrics.density).toInt()
 
-        val slideOutX = if (isDockedLeft) {
-            -viewWidth + peekWidth
-        } else {
-            screenWidth - peekWidth
-        }
+        val slideOutX =
+                if (isDockedLeft) {
+                    -viewWidth + peekPx
+                } else {
+                    screenWidth - peekPx
+                }
 
-        floatingView.animate()
-            .alpha(0.5f)
-            .scaleX(0.8f)
-            .scaleY(0.8f)
-            .setDuration(300)
-            .start()
+        // REMOVED scaleX/scaleY: scaling the window overlay desyncs the
+        // visual bounds from the touch hitbox in WindowManager. Opacity
+        // only — the widget fades but its touchable area stays accurate.
+        floatingView.animate().alpha(0.4f).setDuration(300).start()
 
         animateWidgetPosition(params.x, slideOutX, 300)
     }
@@ -124,73 +125,46 @@ class FloatingVolumeService : Service() {
     }
 
     private fun setupDraggingAndSnapping() {
-        // We'll use a tiny fixed value instead of the system default
-        // to make it feel much more sensitive.
-        val moveThreshold = 5
+        var initialX = 0
+        var initialY = 0
+        var initialTouchX = 0f
+        var initialTouchY = 0f
+        var isDragging = false
 
-        floatingView.setOnTouchListener(
-                object : View.OnTouchListener {
-                    private var initialX = 0
-                    private var initialY = 0
-                    private var initialTouchX = 0f
-                    private var initialTouchY = 0f
-                    private var isDragging = false
-
-                    override fun onTouch(v: View, event: MotionEvent): Boolean {
-                        when (event.action) {
-                            MotionEvent.ACTION_DOWN -> {
-                                // 1. Instant Expand if hidden
-                                if (isCollapsed) {
-                                    expandWidget()
-                                    return true
-                                }
-
-                                initialX = params.x
-                                initialY = params.y
-                                initialTouchX = event.rawX
-                                initialTouchY = event.rawY
-                                isDragging = false
-
-                                resetIdleTimer()
-
-                                // We return false here so the buttons can still be "clicked"
-                                // if the user doesn't move their finger.
-                                return false
-                            }
-                            MotionEvent.ACTION_MOVE -> {
-                                val dx = (event.rawX - initialTouchX).toInt()
-                                val dy = (event.rawY - initialTouchY).toInt()
-
-                                // 2. Immediate Transition to Dragging
-                                if (!isDragging &&
-                                                (abs(dx) > moveThreshold || abs(dy) > moveThreshold)
-                                ) {
-                                    isDragging = true
-                                }
-
-                                if (isDragging) {
-                                    params.x = initialX + dx
-                                    params.y = initialY + dy
-                                    windowManager.updateViewLayout(floatingView, params)
-
-                                    // IMPORTANT: Returning true here "steals" the touch from the
-                                    // buttons
-                                    return true
-                                }
-                            }
-                            MotionEvent.ACTION_UP -> {
-                                if (isDragging) {
-                                    snapToEdge()
-                                    isDragging = false
-                                    return true // Consume the event so a button doesn't click on
-                                    // release
-                                }
-                            }
-                        }
-                        return false
+        floatingView.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    if (isCollapsed) {
+                        expandWidget()
+                        return@setOnTouchListener true
+                    }
+                    initialX = params.x
+                    initialY = params.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    isDragging = false
+                    resetIdleTimer()
+                    false // Let children handle taps normally
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    isDragging = true
+                    params.x = initialX + (event.rawX - initialTouchX).toInt()
+                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    windowManager.updateViewLayout(floatingView, params)
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (isDragging) {
+                        isDragging = false
+                        snapToEdge()
+                        true
+                    } else {
+                        false
                     }
                 }
-        )
+                else -> false
+            }
+        }
     }
 
     // Restores the widget to full size and position
@@ -200,13 +174,12 @@ class FloatingVolumeService : Service() {
 
         val targetX = if (isDockedLeft) 0 else screenWidth - floatingView.width
         animateWidgetPosition(params.x, targetX, 200)
-
         resetIdleTimer()
     }
 
     private fun snapToEdge() {
         updateDisplayMetrics() // Refresh width before snapping
-        
+
         val viewWidth = floatingView.width
         val widgetCenter = params.x + (viewWidth / 2)
         isDockedLeft = widgetCenter < (screenWidth / 2)
@@ -221,7 +194,7 @@ class FloatingVolumeService : Service() {
         }
 
         animateWidgetPosition(params.x, targetX, 200)
-        resetIdleTimer() 
+        resetIdleTimer()
     }
 
     // Helper function to keep our animations clean
@@ -274,11 +247,16 @@ class FloatingVolumeService : Service() {
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        
-        // Wait a tiny bit for the system to finish rotating
-        floatingView.postDelayed({
+        // postOnAnimation waits for exactly one layout pass to complete.
+        // This is guaranteed to be after the display metrics are updated,
+        // unlike an arbitrary postDelayed(100) which is just a guess.
+        floatingView.postOnAnimation {
             updateDisplayMetrics()
-            snapToEdge() 
-        }, 100)
+            // Clamp Y position in case the screen got shorter (landscape).
+            val screenHeight = resources.displayMetrics.heightPixels
+            params.y = params.y.coerceIn(0, screenHeight - floatingView.height)
+            windowManager.updateViewLayout(floatingView, params)
+            snapToEdge()
+        }
     }
 }
