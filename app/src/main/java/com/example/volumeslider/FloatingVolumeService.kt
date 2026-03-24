@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.PixelFormat
 import android.media.AudioManager
 import android.os.Handler
@@ -16,6 +17,9 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.LinearLayout
 import androidx.core.app.NotificationCompat
 
 class FloatingVolumeService : Service() {
@@ -24,47 +28,31 @@ class FloatingVolumeService : Service() {
     private lateinit var floatingView: View
     private lateinit var audioManager: AudioManager
     private lateinit var params: WindowManager.LayoutParams
+    private lateinit var draggableLayout: DraggableLayout
 
-    // State trackers for our new Quick Ball feature
+    // The two visual states
+    private lateinit var peekTab: FrameLayout
+    private lateinit var menuPanel: LinearLayout
+
     private var isCollapsed = false
     private var isDockedLeft = true
     private var screenWidth = 0
+    private var isMuted = false
+
+    private var currentWidgetSizePx = 0
+    private var currentPeekWidthPx = 0
 
     private val handler = Handler(Looper.getMainLooper())
-    private val idleTimeout = 3000L // 3 seconds before hiding
+    private val idleTimeout = 3000L
+    private lateinit var prefListener: SharedPreferences.OnSharedPreferenceChangeListener
 
-    // Add this helper function inside your class
-    private fun updateDisplayMetrics() {
-        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        val bounds = wm.currentWindowMetrics.bounds
-        screenWidth = bounds.width()
+    private val deepDimRunnable = Runnable {
+        if (isCollapsed) {
+            floatingView.animate().alpha(0.2f).setDuration(400).start()
+        }
     }
 
-    // The Quick Ball intellihide animation
-    private val hideRunnable = Runnable {
-        updateDisplayMetrics()
-        isCollapsed = true
-
-        val viewWidth = floatingView.width
-        // Increased from 15dp to 32dp. Still unobtrusive, but
-        // actually hittable — especially important on a 6.5" display.
-        val peekDp = 32
-        val peekPx = (peekDp * resources.displayMetrics.density).toInt()
-
-        val slideOutX =
-                if (isDockedLeft) {
-                    -viewWidth + peekPx
-                } else {
-                    screenWidth - peekPx
-                }
-
-        // REMOVED scaleX/scaleY: scaling the window overlay desyncs the
-        // visual bounds from the touch hitbox in WindowManager. Opacity
-        // only — the widget fades but its touchable area stays accurate.
-        floatingView.animate().alpha(0.4f).setDuration(300).start()
-
-        animateWidgetPosition(params.x, slideOutX, 300)
-    }
+    private val hideRunnable = Runnable { collapseTopeek() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -74,9 +62,15 @@ class FloatingVolumeService : Service() {
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
-        screenWidth = resources.displayMetrics.widthPixels // Get accurate screen width
+
+        loadPreferences()
 
         floatingView = LayoutInflater.from(this).inflate(R.layout.floating_control, null)
+
+        // Get references to all the views we'll control
+        draggableLayout = floatingView as DraggableLayout
+        peekTab = floatingView.findViewById(R.id.peek_tab)
+        menuPanel = floatingView.findViewById(R.id.menu_panel)
 
         params =
                 WindowManager.LayoutParams(
@@ -90,22 +84,70 @@ class FloatingVolumeService : Service() {
 
         params.gravity = Gravity.TOP or Gravity.START
         params.x = 0
-        params.y = 100
+        params.y = 200
 
         setupButtons()
-        setupDraggingAndSnapping()
+        setupDragging()
+        registerPrefListener()
 
         windowManager.addView(floatingView, params)
 
-        // Use a short post to wait for the view to measure its width before snapping
+        floatingView.post {
+            applyWidgetSize(currentWidgetSizePx)
+            snapToEdge()
+        }
+    }
+
+    // ── Preferences ───────────────────────────────────────────────────────────
+
+    private fun loadPreferences() {
+        val density = resources.displayMetrics.density
+        currentWidgetSizePx = (AppPreferences.getWidgetSizeDp(this) * density).toInt()
+        currentPeekWidthPx = (AppPreferences.getPeekWidthDp(this) * density).toInt()
+    }
+
+    private fun registerPrefListener() {
+        prefListener =
+                AppPreferences.registerListener(this) { key ->
+                    when (key) {
+                        AppPreferences.KEY_WIDGET_SIZE -> {
+                            val density = resources.displayMetrics.density
+                            currentWidgetSizePx =
+                                    (AppPreferences.getWidgetSizeDp(this) * density).toInt()
+                            applyWidgetSize(currentWidgetSizePx)
+                        }
+                        AppPreferences.KEY_PEEK_WIDTH -> {
+                            val density = resources.displayMetrics.density
+                            currentPeekWidthPx =
+                                    (AppPreferences.getPeekWidthDp(this) * density).toInt()
+                            if (isCollapsed) {
+                                handler.removeCallbacks(hideRunnable)
+                                collapseTopeek()
+                            }
+                        }
+                    }
+                }
+    }
+
+    private fun applyWidgetSize(sizePx: Int) {
+        val btnUp = floatingView.findViewById<ImageButton>(R.id.btn_vol_up)
+        val btnDown = floatingView.findViewById<ImageButton>(R.id.btn_vol_down)
+
+        listOf(btnUp, btnDown).forEach { btn ->
+            val lp = btn.layoutParams
+            lp.width = sizePx
+            lp.height = sizePx
+            btn.layoutParams = lp
+        }
+
+        floatingView.requestLayout()
         floatingView.post { snapToEdge() }
     }
 
-    private fun setupButtons() {
-        val btnUp = floatingView.findViewById<Button>(R.id.btn_vol_up)
-        val btnDown = floatingView.findViewById<Button>(R.id.btn_vol_down)
+    // ── Buttons ───────────────────────────────────────────────────────────────
 
-        btnUp.setOnClickListener {
+    private fun setupButtons() {
+        floatingView.findViewById<ImageButton>(R.id.btn_vol_up).setOnClickListener {
             resetIdleTimer()
             audioManager.adjustStreamVolume(
                     AudioManager.STREAM_MUSIC,
@@ -114,7 +156,7 @@ class FloatingVolumeService : Service() {
             )
         }
 
-        btnDown.setOnClickListener {
+        floatingView.findViewById<ImageButton>(R.id.btn_vol_down).setOnClickListener {
             resetIdleTimer()
             audioManager.adjustStreamVolume(
                     AudioManager.STREAM_MUSIC,
@@ -122,9 +164,40 @@ class FloatingVolumeService : Service() {
                     AudioManager.FLAG_SHOW_UI
             )
         }
+
+        floatingView.findViewById<Button>(R.id.btn_mute).apply {
+            setOnClickListener {
+                resetIdleTimer()
+                toggleMute()
+            }
+        }
+
+        // Tapping the peek tab expands the widget
+        peekTab.setOnClickListener { expandToMenu() }
     }
 
-    private fun setupDraggingAndSnapping() {
+    private fun toggleMute() {
+        isMuted = !isMuted
+        val btnMute = floatingView.findViewById<Button>(R.id.btn_mute)
+
+        if (isMuted) {
+            audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, 0)
+            btnMute.text = "UNMUTE"
+            btnMute.alpha = 1.0f
+        } else {
+            audioManager.adjustStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.ADJUST_UNMUTE,
+                    0
+            )
+            btnMute.text = "MUTE"
+            btnMute.alpha = 0.6f
+        }
+    }
+
+    // ── Drag ──────────────────────────────────────────────────────────────────
+
+    private fun setupDragging() {
         var initialX = 0
         var initialY = 0
         var initialTouchX = 0f
@@ -134,32 +207,42 @@ class FloatingVolumeService : Service() {
         floatingView.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    if (isCollapsed) {
-                        expandWidget()
-                        return@setOnTouchListener true
-                    }
                     initialX = params.x
                     initialY = params.y
                     initialTouchX = event.rawX
                     initialTouchY = event.rawY
                     isDragging = false
-                    resetIdleTimer()
-                    false // Let children handle taps normally
+                    // Don't reset idle timer here when collapsed —
+                    // we only do that on confirmed tap (ACTION_UP without drag)
+                    if (!isCollapsed) resetIdleTimer()
+                    false
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    val dx = (event.rawX - initialTouchX).toInt()
+                    val dy = (event.rawY - initialTouchY).toInt()
                     isDragging = true
-                    params.x = initialX + (event.rawX - initialTouchX).toInt()
-                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    params.x = initialX + dx
+                    params.y = initialY + dy
                     windowManager.updateViewLayout(floatingView, params)
+                    // Keep suppressing idle timer during drag
+                    handler.removeCallbacks(hideRunnable)
                     true
                 }
                 MotionEvent.ACTION_UP -> {
                     if (isDragging) {
                         isDragging = false
+                        // snapToEdge() updates isDockedLeft correctly
+                        // for both expanded and collapsed states
                         snapToEdge()
                         true
                     } else {
-                        false
+                        // Clean tap — if collapsed, expand
+                        if (isCollapsed) {
+                            expandToMenu()
+                            true
+                        } else {
+                            false
+                        }
                     }
                 }
                 else -> false
@@ -167,37 +250,85 @@ class FloatingVolumeService : Service() {
         }
     }
 
-    // Restores the widget to full size and position
-    private fun expandWidget() {
-        isCollapsed = false
-        floatingView.animate().alpha(1.0f).setDuration(200).start()
+    // ── Expand / Collapse ─────────────────────────────────────────────────────
 
-        val targetX = if (isDockedLeft) 0 else screenWidth - floatingView.width
-        animateWidgetPosition(params.x, targetX, 200)
-        resetIdleTimer()
+    private fun collapseTopeek() {
+        isCollapsed = true
+        draggableLayout.isDragEnabled = true
+
+        menuPanel.visibility = View.GONE
+        peekTab.visibility = View.VISIBLE
+
+        updateDockedSide()
+
+        // Flip the peek tab shape to always face inward toward the screen
+        peekTab.setBackgroundResource(
+                if (isDockedLeft) R.drawable.bg_peek_tab else R.drawable.bg_peek_tab_right
+        )
+
+        floatingView.post {
+            val targetX = if (isDockedLeft) 0 else screenWidth - currentPeekWidthPx
+            floatingView.animate().alpha(0.6f).setDuration(250).start()
+            animateWidgetPosition(params.x, targetX, 280)
+            handler.removeCallbacks(deepDimRunnable)
+            handler.postDelayed(deepDimRunnable, 2000L)
+        }
     }
 
-    private fun snapToEdge() {
-        updateDisplayMetrics() // Refresh width before snapping
+    private fun expandToMenu() {
+        isCollapsed = false
+        draggableLayout.isDragEnabled = true
 
-        val viewWidth = floatingView.width
-        val widgetCenter = params.x + (viewWidth / 2)
-        isDockedLeft = widgetCenter < (screenWidth / 2)
+        // Cancel deep dim if it was scheduled or already applied
+        handler.removeCallbacks(deepDimRunnable)
 
-        val targetX = if (isDockedLeft) 0 else screenWidth - viewWidth
+        peekTab.visibility = View.GONE
+        menuPanel.visibility = View.VISIBLE
 
-        // Keep it within vertical bounds so it doesn't get "stuck" off-screen
-        val screenHeight = resources.displayMetrics.heightPixels
-        if (params.y < 0) params.y = 0
-        if (params.y > screenHeight - floatingView.height) {
-            params.y = screenHeight - floatingView.height
+        floatingView.post {
+            val targetX = if (isDockedLeft) 0 else screenWidth - floatingView.width
+            floatingView.animate().alpha(1.0f).setDuration(200).start()
+            animateWidgetPosition(params.x, targetX, 220)
         }
 
-        animateWidgetPosition(params.x, targetX, 200)
         resetIdleTimer()
     }
 
-    // Helper function to keep our animations clean
+    // ── Edge snapping ─────────────────────────────────────────────────────────
+
+    private fun snapToEdge() {
+        updateDisplayMetrics()
+        updateDockedSide()
+
+        // Keep peek tab shape in sync when snapping
+        if (isCollapsed) {
+            peekTab.setBackgroundResource(
+                    if (isDockedLeft) R.drawable.bg_peek_tab else R.drawable.bg_peek_tab_right
+            )
+        }
+
+        val screenHeight = resources.displayMetrics.heightPixels
+        params.y = params.y.coerceIn(0, screenHeight - floatingView.height)
+
+        val targetX =
+                if (isCollapsed) {
+                    if (isDockedLeft) 0 else screenWidth - currentPeekWidthPx
+                } else {
+                    if (isDockedLeft) 0 else screenWidth - floatingView.width
+                }
+
+        animateWidgetPosition(params.x, targetX, 200)
+
+        if (!isCollapsed) resetIdleTimer()
+    }
+
+    // Extracted helper — updates isDockedLeft based on current position
+    private fun updateDockedSide() {
+        val viewWidth = floatingView.width.takeIf { it > 0 } ?: currentPeekWidthPx
+        val widgetCenter = params.x + (viewWidth / 2)
+        isDockedLeft = widgetCenter < (screenWidth / 2)
+    }
+
     private fun animateWidgetPosition(startX: Int, endX: Int, durationMs: Long) {
         val animator = ValueAnimator.ofInt(startX, endX)
         animator.duration = durationMs
@@ -209,12 +340,40 @@ class FloatingVolumeService : Service() {
     }
 
     private fun resetIdleTimer() {
-        if (!isCollapsed) {
-            floatingView.alpha = 1.0f
-        }
+        if (!isCollapsed) floatingView.alpha = 1.0f
         handler.removeCallbacks(hideRunnable)
         handler.postDelayed(hideRunnable, idleTimeout)
     }
+
+    private fun updateDisplayMetrics() {
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        screenWidth = wm.currentWindowMetrics.bounds.width()
+    }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        floatingView.postOnAnimation {
+            updateDisplayMetrics()
+            val screenHeight = resources.displayMetrics.heightPixels
+            params.y = params.y.coerceIn(0, screenHeight - floatingView.height)
+            windowManager.updateViewLayout(floatingView, params)
+            snapToEdge()
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        AppPreferences.unregisterListener(this, prefListener)
+        handler.removeCallbacks(hideRunnable)
+        handler.removeCallbacks(deepDimRunnable)
+        if (::floatingView.isInitialized) {
+            windowManager.removeView(floatingView)
+        }
+    }
+
+    // ── Notification ──────────────────────────────────────────────────────────
 
     private fun startForegroundNotification() {
         val channelId = "VolumeServiceChannel"
@@ -235,28 +394,5 @@ class FloatingVolumeService : Service() {
                         .build()
 
         startForeground(1, notification)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        handler.removeCallbacks(hideRunnable)
-        if (::floatingView.isInitialized) {
-            windowManager.removeView(floatingView)
-        }
-    }
-
-    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
-        super.onConfigurationChanged(newConfig)
-        // postOnAnimation waits for exactly one layout pass to complete.
-        // This is guaranteed to be after the display metrics are updated,
-        // unlike an arbitrary postDelayed(100) which is just a guess.
-        floatingView.postOnAnimation {
-            updateDisplayMetrics()
-            // Clamp Y position in case the screen got shorter (landscape).
-            val screenHeight = resources.displayMetrics.heightPixels
-            params.y = params.y.coerceIn(0, screenHeight - floatingView.height)
-            windowManager.updateViewLayout(floatingView, params)
-            snapToEdge()
-        }
     }
 }
